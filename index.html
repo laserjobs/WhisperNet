@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhisperNet: Ultrasonic Chat</title>
+    <style>
+        :root {
+            --bg-color: #0d0d0d;
+            --panel-bg: #1a1a1a;
+            --text-primary: #00ffcc;
+            --text-secondary: #0088aa;
+            --accent: #ff00ff;
+            --border: 1px solid #333;
+        }
+
+        body {
+            font-family: 'Courier New', Courier, monospace;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+        }
+
+        .container {
+            max-width: 800px;
+            width: 100%;
+            background: var(--panel-bg);
+            padding: 20px;
+            border: var(--border);
+            border-radius: 8px;
+            box-shadow: 0 0 20px rgba(0, 255, 204, 0.1);
+        }
+
+        header {
+            border-bottom: var(--border);
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+        }
+
+        h1 { margin: 0; font-size: 24px; }
+        p { color: var(--text-secondary); margin: 5px 0 0 0; font-size: 14px; }
+
+        button {
+            background: #222;
+            color: var(--text-primary);
+            border: 1px solid var(--text-primary);
+            padding: 10px 15px;
+            font-family: inherit;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s;
+            border-radius: 4px;
+        }
+
+        button:hover:not(:disabled) {
+            background: var(--text-primary);
+            color: #000;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            border-color: #555;
+            color: #555;
+        }
+
+        .controls { margin-bottom: 20px; }
+
+        .visualizer-container {
+            position: relative;
+            margin-bottom: 20px;
+            border: var(--border);
+            background: #000;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 150px;
+        }
+
+        .canvas-label {
+            position: absolute;
+            top: 5px;
+            left: 5px;
+            font-size: 12px;
+            color: rgba(255,255,255,0.7);
+            background: rgba(0,0,0,0.5);
+            padding: 2px 6px;
+            border-radius: 3px;
+        }
+
+        #chat-box {
+            background: #000;
+            padding: 15px;
+            height: 250px;
+            overflow-y: scroll;
+            border: var(--border);
+            border-radius: 4px;
+            margin-bottom: 15px;
+        }
+
+        .msg-tx { color: var(--text-secondary); text-align: right; margin: 8px 0; }
+        .msg-rx { color: var(--accent); text-align: left; margin: 8px 0; font-weight: bold; }
+        .sys-msg { color: #666; font-style: italic; margin: 8px 0; }
+
+        #input-container {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        #msg-input {
+            flex-grow: 1;
+            background: #000;
+            color: var(--text-primary);
+            border: var(--border);
+            padding: 10px;
+            font-family: inherit;
+            border-radius: 4px;
+        }
+
+        #msg-input:focus { outline: none; border-color: var(--text-primary); }
+
+        #char-count {
+            font-size: 14px;
+            color: var(--text-primary);
+            min-width: 60px;
+            text-align: center;
+        }
+
+        @media (max-width: 600px) {
+            canvas { height: 220px; }
+            #input-container { flex-wrap: wrap; }
+            #msg-input { width: 100%; }
+            #char-count { width: 100%; text-align: right; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🦇 WhisperNet Modem</h1>
+            <p>3-FSK Near-Ultrasonic (18.5kHz - 19.5kHz) | 8 Baud</p>
+        </header>
+
+        <div class="controls">
+            <button id="btn-listen">🎙️ Activate Microphone (RX)</button>
+        </div>
+
+        <div class="visualizer-container">
+            <canvas id="spectrogram" width="800" height="150"></canvas>
+            <div class="canvas-label">18kHz - 20kHz Spectrum Waterfall</div>
+        </div>
+
+        <div id="chat-box">
+            <div class="sys-msg">System: Ready. Click 'Activate Microphone' to listen for data.</div>
+        </div>
+
+        <div id="input-container">
+            <input type="text" id="msg-input" placeholder="Type a message to transmit silently..." disabled maxlength="60">
+            <span id="char-count">0 / 60</span>
+            <button id="btn-send" disabled>Transmit</button>
+        </div>
+    </div>
+
+    <script>
+        // === UI & DOM Elements ===
+        const chatBox = document.getElementById('chat-box');
+        const inputEl = document.getElementById('msg-input');
+        const btnListen = document.getElementById('btn-listen');
+        const btnSend = document.getElementById('btn-send');
+        const charCountEl = document.getElementById('char-count');
+        const canvas = document.getElementById('spectrogram');
+        const canvasCtx = canvas.getContext('2d', { alpha: false });
+
+        function logChat(msg, type = 'sys-msg') {
+            const div = document.createElement('div');
+            div.className = type;
+            div.textContent = msg;
+            chatBox.appendChild(div);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        // Input character counter warning
+        inputEl.addEventListener('input', () => {
+            const len = inputEl.value.length;
+            charCountEl.textContent = `${len} / 60`;
+            charCountEl.style.color = len > 50 ? '#ffaa00' : '#00ffcc';
+        });
+
+        // === MODEM CONFIG ===
+        let audioCtx, analyser;
+        const FREQ_0 = 18500;
+        const FREQ_C = 19000;
+        const FREQ_1 = 19500;
+        const BAUD = 8;
+        const BIT_TIME = 1 / BAUD;
+
+        // ASCII Framing
+        const STX = 0x02; // Start of Text
+        const ETX = 0x03; // End of Text
+
+        async function initAudio() {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+            if (audioCtx.state === 'suspended') await audioCtx.resume();
+        }
+
+        // ==========================================
+        // TRANSMITTER (TX)
+        // ==========================================
+        btnSend.addEventListener('click', async () => {
+            const text = inputEl.value.trim();
+            if (!text) return;
+            
+            // Reset UI
+            inputEl.value = '';
+            charCountEl.textContent = `0 / 60`;
+            charCountEl.style.color = '#00ffcc';
+            
+            logChat(`TX: ${text}`, 'msg-tx');
+            await initAudio();
+
+            // 1. Framing
+            let bytes = [STX];
+            for (let i = 0; i < text.length; i++) bytes.push(text.charCodeAt(i));
+            bytes.push(ETX);
+
+            // 2. Bytes to Bits with EVEN PARITY (9 bits per byte)
+            let bits = [];
+            bytes.forEach(b => {
+                let onesCount = 0;
+                // 8 Data Bits (MSB first)
+                for (let i = 7; i >= 0; i--) {
+                    let bit = (b >> i) & 1;
+                    bits.push(bit);
+                    if (bit === 1) onesCount++;
+                }
+                // 9th Bit: Even Parity (makes total number of 1s even)
+                bits.push(onesCount % 2 === 0 ? 0 : 1);
+            });
+
+            // 3. Audio Modulation
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            let t = audioCtx.currentTime + 0.1;
+
+            // PREAMBLE: 6 Clock pulses to wake up receiver
+            for(let i=0; i<6; i++) {
+                osc.frequency.setValueAtTime(FREQ_C, t);
+                osc.frequency.setValueAtTime(0, t + (BIT_TIME / 2)); 
+                t += BIT_TIME;
+            }
+
+            // DATA TRANSMISSION
+            bits.forEach(bit => {
+                const dataFreq = bit === 1 ? FREQ_1 : FREQ_0;
+                osc.frequency.setValueAtTime(FREQ_C, t);                    // Clock half
+                osc.frequency.setValueAtTime(dataFreq, t + (BIT_TIME / 2)); // Data half
+                t += BIT_TIME;
+            });
+
+            // Smooth ramp down (Max gain 0.7 to prevent hardware clipping/harmonics)
+            gain.gain.setValueAtTime(0.7, audioCtx.currentTime);
+            gain.gain.setValueAtTime(0.7, t - 0.05);
+            gain.gain.linearRampToValueAtTime(0, t);
+
+            osc.start(audioCtx.currentTime);
+            osc.stop(t);
+        });
+
+        // ==========================================
+        // RECEIVER (RX)
+        // ==========================================
+        let isListening = false;
+
+        // RX State Machine Variables
+        let rxState = 'WAIT_CLOCK';
+        let currentBits = [];
+        let receivedMessage = "";
+        let lastActiveTone = null;
+        let toneCount = 0;
+        let lastClockTime = Date.now();
+        let parityErrors = 0;
+
+        btnListen.addEventListener('click', async () => {
+            if (isListening) return;
+            await initAudio();
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+                });
+                const source = audioCtx.createMediaStreamSource(stream);
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 2048; 
+                source.connect(analyser);
+
+                isListening = true;
+                btnListen.disabled = true;
+                btnListen.textContent = "🎙️ Listening...";
+                btnSend.disabled = false;
+                inputEl.disabled = false;
+                
+                // Initialize black canvas
+                canvasCtx.fillStyle = '#000';
+                canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+
+                logChat("System: Microphone active. Listening for preamble...", 'sys-msg');
+                requestAnimationFrame(detectLoop);
+            } catch (e) {
+                logChat(`System Mic Error: ${e.message}`, 'sys-msg');
+                logChat(`Tip: You must run this over HTTPS or Localhost for microphone access!`, 'sys-msg');
+            }
+        });
+
+        function detectLoop() {
+            if (!isListening) return;
+
+            const data = new Float32Array(analyser.frequencyBinCount);
+            analyser.getFloatFrequencyData(data);
+
+            const sr = audioCtx.sampleRate;
+            const binWidth = sr / analyser.fftSize;
+
+            // Visualization Update (Waterfall)
+            drawWaterfall(data, binWidth);
+
+            const bin0 = Math.round(FREQ_0 / binWidth);
+            const binC = Math.round(FREQ_C / binWidth);
+            const bin1 = Math.round(FREQ_1 / binWidth);
+
+            // CPU Saver: If the loudest tone in our band is pure silence, skip state machine processing
+            if (Math.max(data[bin0], data[binC], data[bin1]) < -85) {
+                return requestAnimationFrame(detectLoop);
+            }
+
+            const v0 = data[bin0] || -100;
+            const vC = data[binC] || -100;
+            const v1 = data[bin1] || -100;
+
+            const TH = -62; // Detection Threshold (dB)
+
+            // Tone Polling
+            let activeTone = null;
+            if (vC > TH && vC > v0 && vC > v1) activeTone = 'C';
+            else if (v1 > TH && v1 > v0 && v1 > vC) activeTone = '1';
+            else if (v0 > TH && v0 > v1 && v0 > vC) activeTone = '0';
+
+            // Hysteresis: Require 3 consecutive frames of the same tone
+            if (activeTone === lastActiveTone) {
+                toneCount++;
+            } else {
+                toneCount = 1;
+                lastActiveTone = activeTone;
+            }
+
+            if (toneCount >= 3 && activeTone !== null) {
+                const now = Date.now();
+
+                if (rxState === 'WAIT_CLOCK' && activeTone === 'C') {
+                    rxState = 'WAIT_DATA';
+                    lastClockTime = now;
+                }
+                else if (rxState === 'WAIT_DATA' && (activeTone === '0' || activeTone === '1')) {
+                    if (now - lastClockTime < BIT_TIME * 1000 * 1.5) { 
+                        currentBits.push(activeTone === '1' ? 1 : 0);
+                        rxState = 'WAIT_CLOCK'; 
+
+                        // We expect 9 bits (8 data + 1 parity)
+                        if (currentBits.length === 9) {
+                            const dataBits = currentBits.slice(0, 8);
+                            const parityBit = currentBits[8];
+                            const byteVal = parseInt(dataBits.join(''), 2);
+                            
+                            // Check Parity
+                            const onesCount = dataBits.filter(b => b === 1).length;
+                            const expectedParity = onesCount % 2 === 0 ? 0 : 1;
+                            
+                            currentBits = [];
+
+                            if (expectedParity !== parityBit) {
+                                parityErrors++;
+                                receivedMessage += "[?]"; // Indicate bit-flip to user
+                            } else {
+                                if (byteVal === STX) {
+                                    receivedMessage = "";
+                                    parityErrors = 0;
+                                    logChat("RX: [Sync Lock Acquired]", 'sys-msg');
+                                } else if (byteVal === ETX) {
+                                    if (receivedMessage) {
+                                        const suffix = parityErrors > 0 ? ` (Warning: ${parityErrors} parity errors)` : '';
+                                        logChat(`RX: ${receivedMessage}${suffix}`, 'msg-rx');
+                                    }
+                                    receivedMessage = "";
+                                    parityErrors = 0; // Reset for the next message!
+                                } else if (byteVal >= 32 && byteVal <= 126) {
+                                    receivedMessage += String.fromCharCode(byteVal);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Safety timeout: reset if no clock for > 2 seconds
+            if (Date.now() - lastClockTime > 2000 && rxState === 'WAIT_DATA') {
+                rxState = 'WAIT_CLOCK';
+                currentBits = [];
+            }
+
+            requestAnimationFrame(detectLoop);
+        }
+
+        // === WATERFALL SPECTROGRAM ===
+        function drawWaterfall(data, binWidth) {
+            const minFreq = 18000;
+            const maxFreq = 20000;
+            const minBin = Math.floor(minFreq / binWidth);
+            const maxBin = Math.ceil(maxFreq / binWidth);
+            const numBins = maxBin - minBin;
+            
+            // 1. Shift the canvas left by 2 pixels (Fast hardware scrolling)
+            canvasCtx.drawImage(canvas, -2, 0);
+            
+            // 2. Draw the new data column on the far right
+            const colWidth = 2;
+            const x = canvas.width - colWidth;
+            const barHeight = canvas.height / numBins;
+            
+            for (let i = 0; i < numBins; i++) {
+                const db = data[minBin + i];
+                
+                // Clamp and normalize DB (-100 to -30) to a 0.0 - 1.0 range
+                let intensity = Math.max(0, Math.min(1, (db + 100) / 70));
+                
+                // SDR Heatmap Colors (Black -> Dark Blue -> Cyan -> Yellow/White)
+                canvasCtx.fillStyle = `hsl(${240 - intensity * 180}, 100%, ${intensity * 50}%)`;
+                
+                // Draw bottom-up
+                canvasCtx.fillRect(x, canvas.height - ((i+1) * barHeight), colWidth, Math.ceil(barHeight));
+            }
+
+            // 3. Overlay faint horizontal guide lines for our 3 frequencies
+            [FREQ_0, FREQ_C, FREQ_1].forEach(f => {
+                const binOffset = Math.round(f / binWidth) - minBin;
+                const y = canvas.height - (binOffset * barHeight);
+                
+                // Magenta for Clock, faint white for Data 0/1
+                canvasCtx.fillStyle = f === FREQ_C ? 'rgba(255, 0, 255, 0.8)' : 'rgba(255, 255, 255, 0.4)';
+                canvasCtx.fillRect(x, y, colWidth, 1);
+            });
+        }
+    </script>
+</body>
+</html>
