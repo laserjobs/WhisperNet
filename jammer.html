@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Aegis Pro: Reactive Defense</title>
+    <style>
+        :root { --danger: #ff3333; --safe: #00ffcc; --bg: #0a0a0a; }
+        body { font-family: 'Courier New', monospace; background: var(--bg); color: #eee; display: flex; justify-content: center; padding: 20px; }
+        .card { width: 100%; max-width: 650px; background: #151515; border: 1px solid #333; padding: 25px; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,0.8); }
+        h2 { color: var(--safe); margin: 0; letter-spacing: 3px; border-bottom: 1px solid #333; padding-bottom: 10px; }
+        
+        .status-panel { padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0; border: 2px solid #222; position: relative; overflow: hidden; }
+        .scanning { border-color: var(--safe); background: rgba(0, 255, 204, 0.05); }
+        .jamming { border-color: var(--danger); background: rgba(255, 51, 51, 0.2); animation: pulse 0.5s infinite; }
+        
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
+        
+        canvas { width: 100%; height: 180px; background: #000; border-radius: 4px; border: 1px solid #444; margin: 10px 0; image-rendering: pixelated; }
+        .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 20px; }
+        .control-group { background: #222; padding: 10px; border-radius: 4px; border: 1px solid #333; }
+        label { font-size: 11px; color: #888; display: block; margin-bottom: 5px; }
+        
+        button { width: 100%; padding: 15px; background: transparent; border: 1px solid var(--safe); color: var(--safe); font-weight: bold; cursor: pointer; border-radius: 4px; grid-column: span 2; }
+        button:hover { background: var(--safe); color: #000; }
+        .log { font-size: 11px; color: #666; height: 120px; overflow-y: auto; border-top: 1px solid #333; padding-top: 10px; line-height: 1.4; }
+        .threat-txt { color: var(--danger); font-weight: bold; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h2>AEGIS PRO // ULTRASONIC DENIAL</h2>
+    
+    <div id="status-panel" class="status-panel">
+        <div id="status-text" style="font-size: 12px; letter-spacing: 1px;">SYSTEM STANDBY</div>
+        <h1 id="hz-display" style="margin: 10px 0; font-size: 42px;">--</h1>
+    </div>
+
+    <canvas id="viz"></canvas>
+
+    <div class="controls">
+        <div class="control-group">
+            <label>SENSITIVITY (THRESHOLD DB)</label>
+            <input type="range" id="range-th" min="-90" max="-30" value="-60" style="width:100%">
+            <div style="display:flex; justify-content:space-between; font-size:10px;"><span>LOW</span><span id="th-val">-60dB</span><span>HIGH</span></div>
+        </div>
+        <div class="control-group">
+            <label>JAMMING STRENGTH</label>
+            <input type="range" id="range-gain" min="0.1" max="1.0" step="0.1" value="0.7" style="width:100%">
+            <div style="display:flex; justify-content:space-between; font-size:10px;"><span>SOFT</span><span id="gain-val">0.7</span><span>MAX</span></div>
+        </div>
+        <button id="btn-power">ENGAGE DEFENSE PROTOCOL</button>
+    </div>
+
+    <div class="log" id="log-el">Initialize mic to begin spectrum analysis...<br></div>
+</div>
+
+<script>
+    const logEl = document.getElementById('log-el');
+    const canvas = document.getElementById('viz');
+    const ctx = canvas.getContext('2d', {alpha: false});
+    const thSlider = document.getElementById('range-th');
+    const gainSlider = document.getElementById('range-gain');
+    
+    let audioCtx, analyser, dataArray, isRunning = false, isJamming = false;
+    let threshold = -60;
+    let jamGain = 0.7;
+
+    function log(msg, isThreat = false) {
+        const time = new Date().toLocaleTimeString().split(' ')[0];
+        const span = isThreat ? `<span class="threat-txt">${msg}</span>` : msg;
+        logEl.innerHTML = `[${time}] ${span}<br>` + logEl.innerHTML;
+    }
+
+    thSlider.oninput = (e) => { threshold = parseInt(e.target.value); document.getElementById('th-val').innerText = threshold + 'dB'; };
+    gainSlider.oninput = (e) => { jamGain = parseFloat(e.target.value); document.getElementById('gain-val').innerText = jamGain; };
+
+    document.getElementById('btn-power').onclick = async () => {
+        if (isRunning) { location.reload(); return; }
+        
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 48000});
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+            audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } 
+        });
+
+        const source = audioCtx.createMediaStreamSource(stream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 2048;
+        source.connect(analyser);
+        dataArray = new Float32Array(analyser.frequencyBinCount);
+
+        isRunning = true;
+        document.getElementById('btn-power').textContent = "TERMINATE PROTOCOL";
+        log("Defensive hardware engaged. Monitoring 18kHz-22kHz.");
+        render();
+    };
+
+    function render() {
+        if (!isRunning) return;
+        analyser.getFloatFrequencyData(dataArray);
+
+        const binWidth = audioCtx.sampleRate / analyser.fftSize;
+        const startBin = Math.floor(18000 / binWidth);
+        const endBin = Math.ceil(22000 / binWidth);
+
+        let peakVol = -Infinity;
+        let peakHz = 0;
+
+        for (let i = startBin; i < endBin; i++) {
+            if (dataArray[i] > peakVol) {
+                peakVol = dataArray[i];
+                peakHz = i * binWidth;
+            }
+        }
+
+        drawWaterfall(dataArray, binWidth, startBin, endBin);
+
+        if (peakVol > threshold && !isJamming) {
+            engageCountermeasure(Math.round(peakHz));
+        }
+
+        if (!isJamming) {
+            document.getElementById('status-panel').className = "status-panel scanning";
+            document.getElementById('status-text').textContent = "🛡️ MONITORING SPECTRUM";
+            document.getElementById('hz-display').textContent = "CLEAN";
+        }
+
+        requestAnimationFrame(render);
+    }
+
+    function engageCountermeasure(targetHz) {
+        isJamming = true;
+        document.getElementById('status-panel').className = "status-panel jamming";
+        document.getElementById('status-text').textContent = "⚠️ SIGNAL INTERCEPTED";
+        document.getElementById('hz-display').textContent = targetHz + "Hz";
+        log(`THREAT DETECTED at ${targetHz}Hz. Countermeasures active.`, true);
+
+        const duration = 2.5; 
+        const osc = audioCtx.createOscillator();
+        const noise = audioCtx.createBufferSource();
+        const gain = audioCtx.createGain();
+        const filter = audioCtx.createBiquadFilter();
+
+        // 1. Create a "Warble" Targeted Jammer
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(targetHz - 500, audioCtx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(targetHz + 500, audioCtx.currentTime + duration);
+
+        // 2. Mix with Broadband White Noise
+        const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate * duration, audioCtx.sampleRate);
+        const chan = buffer.getChannelData(0);
+        for (let i = 0; i < buffer.length; i++) chan[i] = Math.random() * 2 - 1;
+        noise.buffer = buffer;
+
+        // 3. Safety filtering (kill audible spillover)
+        filter.type = "highpass";
+        filter.frequency.value = 17500;
+
+        osc.connect(filter);
+        noise.connect(filter);
+        filter.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        gain.gain.setValueAtTime(jamGain, audioCtx.currentTime);
+        gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + duration);
+
+        osc.start();
+        noise.start();
+        
+        setTimeout(() => {
+            osc.stop();
+            noise.stop();
+            isJamming = false;
+            log("Countermeasure cycle complete. Scanning...");
+        }, duration * 1000);
+    }
+
+    function drawWaterfall(data, binWidth, startBin, endBin) {
+        const numBins = endBin - startBin;
+        ctx.drawImage(canvas, -2, 0); // Scroll waterfall left
+        
+        const x = canvas.width - 2;
+        const barHeight = canvas.height / numBins;
+
+        for (let i = 0; i < numBins; i++) {
+            const db = data[startBin + i];
+            let intensity = Math.max(0, Math.min(1, (db + 100) / 60));
+            // Heatmap: Blue (Quiet) -> Green -> Red (Hot)
+            ctx.fillStyle = `hsl(${240 - intensity * 240}, 100%, ${intensity * 50}%)`;
+            ctx.fillRect(x, canvas.height - (i * barHeight), 2, Math.ceil(barHeight));
+        }
+    }
+</script>
+
+</body>
+</html>
